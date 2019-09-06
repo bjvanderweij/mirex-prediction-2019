@@ -1,6 +1,7 @@
 ### IDyOM 
 
 data/
+database.sqlite
 
 ### Sphinx
 

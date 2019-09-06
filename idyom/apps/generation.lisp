@@ -32,6 +32,90 @@
 ;; DATASET GENERATION 
 ;; ========================================================================
 
+(defun mirex-2019 (training-set-id primes-set-id basic-attributes attributes
+		   &key (iterations 100) (duration 10) (units 4)
+		     (method :metropolis) (models :both+))
+  "Generate mirex prediction task results.
+
+Load the training set.
+Calculate event-density (notes per quarter-note).
+Calculate continuation length.
+For each prime, generate a continuation.
+Output continuations as CSV.
+Save each CV in output directory with filename <prime-name>-continuation.csv
+
+duration -- number of time-units
+units -- number by which to divide whole note (e.g., 4 for quarters)
+"
+  (let* ((primes (md:get-event-sequences (list primes-set-id)))
+	 (timebase (md:timebase (first primes)))
+	 (unit-duration (/ timebase units))
+	 (event-density (event-density primes unit-duration))
+	 (continuation-length (* event-density duration)))
+    (format t "Timebase: ~$. Unit-duration ~$. Event-density ~$. Continuation-length ~$.~%"
+	    timebase unit-duration event-density continuation-length)
+    (dolist (prime primes)
+      (let ((continuation
+	     (continuation training-set-id prime basic-attributes
+			   attributes (floor continuation-length)
+			   :iterations iterations
+			   :method method
+			   :models models)))
+	(format t "~{~A, ~}" (mapcar #'md:chromatic-pitch continuation))))))
+	
+	 
+
+(defun event-density (sequences unit)
+  (flet ((duration (s)
+	   (let* ((l (coerce s 'list))
+		  (first (first l))
+		  (last (car (last l)))
+		  (begin (md:onset first))
+		  (end (+ (md:onset last) (md:duration last))))
+	     (- end begin))))
+    (let* ((duration (apply #'+ (mapcar #'duration sequences)))
+	   (events (apply #'+ (mapcar #'length sequences)))
+	   (density (/ events duration)))
+      (* density unit))))
+      
+(defun continuation (training-set-id prime basic-attributes attributes continuation-length
+		     &key (iterations 100) (random-state cl:*random-state*) (method :metropolis)
+		       (models :both+) use-ltms-cache?)
+  (mvs:set-models models)
+  (initialise-prediction-cache training-set-id attributes)
+  (let* ((training-set (md:get-event-sequences (list training-set-id)))
+         (viewpoints (get-viewpoints attributes))
+         (basic-viewpoints (get-basic-viewpoints basic-attributes training-set))
+	 (initialization-sequence (dummy-continuation prime continuation-length))
+         (ltms (get-long-term-models viewpoints training-set nil
+                                     training-set-id (format nil "~Agen" training-set-id)
+                                     nil nil nil use-ltms-cache?))
+         (mvs (make-mvs basic-viewpoints viewpoints ltms))
+         (sequence
+          (case method
+            (:metropolis
+	     (metropolis-sampling mvs initialization-sequence iterations random-state
+				  :continuation-length continuation-length))
+            (:gibbs
+	     (gibbs-sampling mvs initialization-sequence iterations random-state
+			     :continuation-length continuation-length)))))
+    sequence))
+
+(defun dummy-continuation (prime n)
+  "Either
+* Use the random algorithm to obtain a sample.
+* Repeat the last note n times
+* Pick something from the dataset
+* Repeat the prime
+"
+  (let* ((prime (coerce prime 'list))
+	 (last (car (last prime)))
+	 (continuation))
+    (dotimes (i n)
+      (push (md:copy-event last) continuation))
+    (append prime continuation)))
+  
+
 (defun dataset-generation (dataset-id basic-attributes attributes base-id
                            &key
                              (models :both+)
@@ -258,18 +342,20 @@
 ;; METROPOLIS SAMPLING
 ;; ======================================================================== 
 
-(defmethod metropolis-sampling ((m mvs) sequence iterations random-state)
+(defmethod metropolis-sampling ((m mvs) sequence iterations random-state
+				&key continuation-length)
   ;(initialise-prediction-cache) 
   (let* ((sequence (coerce sequence 'list))
          (pitch-sequence (mapcar #'(lambda (x) (get-attribute x 'cpitch))
                                  sequence))
          (l (length sequence))
+	 (continuation-length (or continuation-length l))
          (cpitch (viewpoints:get-viewpoint 'cpitch))
          (predictions (sampling-predict-sequence m sequence cpitch))
          (original-p (seq-probability predictions)))
     (dotimes (i iterations sequence)
       (let* (;(index (random-index sequence))
-             (index (- l (mod i l) 1))
+             (index (- l (mod i continuation-length) 1))
              (distribution (metropolis-event-distribution predictions index))
              (new-sequence
               (metropolis-new-sequence sequence distribution index random-state))
@@ -336,17 +422,19 @@
 ;; GIBBS SAMPLING 
 ;; ======================================================================== 
 
-(defmethod gibbs-sampling ((m mvs) sequence iterations random-state)
+(defmethod gibbs-sampling ((m mvs) sequence iterations random-state
+			   &key continuation-length)
   (let* ((sequence (coerce sequence 'list))
          (pitch-sequence (mapcar #'(lambda (x) (get-attribute x 'cpitch))
                                  sequence))
          (l (length sequence))
+	 (continuation-length (or continuation-length l))
          (cpitch (viewpoints:get-viewpoint 'cpitch))
          (predictions (sampling-predict-sequence m sequence cpitch))
          (original-p (seq-probability predictions)))
     (dotimes (i iterations sequence)
       (let* (;(index (random-index sequence))
-             (index (- l (mod i l) 1))
+             (index (- l (mod i continuation-length) 1))
              (new-sequences (gibbs-new-sequences sequence index))
              (distribution (gibbs-sequence-distribution m new-sequences cpitch))
              (new-sequence (select-from-distribution distribution random-state))
