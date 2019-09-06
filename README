@@ -1,0 +1,10 @@
+input representation: symbolic, monophonic
+subtasks: 1
+threads: 
+expected memory footprint:
+expected runtime:
+requirements: sbcl, quicklisp
+
+```
+sbcl run.lisp
+```
