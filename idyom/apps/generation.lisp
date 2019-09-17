@@ -20,10 +20,14 @@
 
 (cl:in-package #:generation)
 
+(defparameter *debug* nil)
+
 (defgeneric sampling-predict-sequence (mvs sequence cpitch))
 (defgeneric complete-prediction (mvs sequence cached-prediction))
-(defgeneric metropolis-sampling (mvs sequence iterations random-state))
-(defgeneric gibbs-sampling (mvs sequence iterations random-state))
+(defgeneric metropolis-sampling (mvs sequence iterations random-state
+				 &key continuation-length))
+(defgeneric gibbs-sampling (mvs sequence iterations random-state
+			    &key continuation-length))
 (defgeneric gibbs-sequence-distribution (mvs sequences cpitch))
 (defgeneric random-walk (mvs sequence context-length random-state))
 (defgeneric generate-event (mvs event predictions random-state))
@@ -31,90 +35,6 @@
 ;; ========================================================================
 ;; DATASET GENERATION 
 ;; ========================================================================
-
-(defun mirex-2019 (training-set-id primes-set-id basic-attributes attributes
-		   &key (iterations 100) (duration 10) (units 4)
-		     (method :metropolis) (models :both+))
-  "Generate mirex prediction task results.
-
-Load the training set.
-Calculate event-density (notes per quarter-note).
-Calculate continuation length.
-For each prime, generate a continuation.
-Output continuations as CSV.
-Save each CV in output directory with filename <prime-name>-continuation.csv
-
-duration -- number of time-units
-units -- number by which to divide whole note (e.g., 4 for quarters)
-"
-  (let* ((primes (md:get-event-sequences (list primes-set-id)))
-	 (timebase (md:timebase (first primes)))
-	 (unit-duration (/ timebase units))
-	 (event-density (event-density primes unit-duration))
-	 (continuation-length (* event-density duration)))
-    (format t "Timebase: ~$. Unit-duration ~$. Event-density ~$. Continuation-length ~$.~%"
-	    timebase unit-duration event-density continuation-length)
-    (dolist (prime primes)
-      (let ((continuation
-	     (continuation training-set-id prime basic-attributes
-			   attributes (floor continuation-length)
-			   :iterations iterations
-			   :method method
-			   :models models)))
-	(format t "~{~A, ~}" (mapcar #'md:chromatic-pitch continuation))))))
-	
-	 
-
-(defun event-density (sequences unit)
-  (flet ((duration (s)
-	   (let* ((l (coerce s 'list))
-		  (first (first l))
-		  (last (car (last l)))
-		  (begin (md:onset first))
-		  (end (+ (md:onset last) (md:duration last))))
-	     (- end begin))))
-    (let* ((duration (apply #'+ (mapcar #'duration sequences)))
-	   (events (apply #'+ (mapcar #'length sequences)))
-	   (density (/ events duration)))
-      (* density unit))))
-      
-(defun continuation (training-set-id prime basic-attributes attributes continuation-length
-		     &key (iterations 100) (random-state cl:*random-state*) (method :metropolis)
-		       (models :both+) use-ltms-cache?)
-  (mvs:set-models models)
-  (initialise-prediction-cache training-set-id attributes)
-  (let* ((training-set (md:get-event-sequences (list training-set-id)))
-         (viewpoints (get-viewpoints attributes))
-         (basic-viewpoints (get-basic-viewpoints basic-attributes training-set))
-	 (initialization-sequence (dummy-continuation prime continuation-length))
-         (ltms (get-long-term-models viewpoints training-set nil
-                                     training-set-id (format nil "~Agen" training-set-id)
-                                     nil nil nil use-ltms-cache?))
-         (mvs (make-mvs basic-viewpoints viewpoints ltms))
-         (sequence
-          (case method
-            (:metropolis
-	     (metropolis-sampling mvs initialization-sequence iterations random-state
-				  :continuation-length continuation-length))
-            (:gibbs
-	     (gibbs-sampling mvs initialization-sequence iterations random-state
-			     :continuation-length continuation-length)))))
-    sequence))
-
-(defun dummy-continuation (prime n)
-  "Either
-* Use the random algorithm to obtain a sample.
-* Repeat the last note n times
-* Pick something from the dataset
-* Repeat the prime
-"
-  (let* ((prime (coerce prime 'list))
-	 (last (car (last prime)))
-	 (continuation))
-    (dotimes (i n)
-      (push (md:copy-event last) continuation))
-    (append prime continuation)))
-  
 
 (defun dataset-generation (dataset-id basic-attributes attributes base-id
                            &key
@@ -300,7 +220,8 @@ units -- number by which to divide whole note (e.g., 4 for quarters)
   (let* ((cpitch-sequence (viewpoint-sequence cpitch sequence))
          (cached-prediction (cached-prediction cpitch-sequence))
          (prediction (complete-prediction m sequence cached-prediction)))
-    (when mvs::*debug*
+    (when *debug*
+      ;;(format t "Cpitch sequence ~a~%" cpitch-sequence)
       (format t "~&Original length: ~A; Cached length: ~A; Final length: ~A~%" 
               (length cpitch-sequence) (length cached-prediction) 
               (length prediction)))
@@ -362,7 +283,7 @@ units -- number by which to divide whole note (e.g., 4 for quarters)
              (old-cpitch (get-attribute (nth index sequence) 'cpitch))
              (new-cpitch (get-attribute (nth index new-sequence) 'cpitch)))
         (unless (eql old-cpitch new-cpitch)
-          (when mvs::*debug*
+          (when *debug*
             (format t "~&Old cpitch: ~A; New cpitch: ~A" 
                     old-cpitch new-cpitch)
             (format t "~&new-sequence: ~A; old-sequence: ~A~%" 
@@ -378,6 +299,7 @@ units -- number by which to divide whole note (e.g., 4 for quarters)
                  (next-sequence (if select? new-sequence sequence))
                  (next-predictions (if select? new-predictions predictions))
                  (next-cpitch (if select? new-cpitch old-cpitch)))
+	    ;;(format t "Proposing ~a~%" new-cpitch)
             (when select?
               (format t 
                "~&Iteration ~A; Index ~A; Orig ~A; Old ~A; New ~A; Select ~A; EP ~A; P ~A; OP ~A."

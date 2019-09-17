@@ -1,4 +1,4 @@
-#!/usr/bin/sbcl --script
+#!/usr/bin/sbcl --script 
 
 #-quicklisp
 (let ((quicklisp-init (merge-pathnames "quicklisp/setup.lisp"
@@ -7,14 +7,145 @@
     (load quicklisp-init)))
 
 (let ((idyom-root (sb-ext:posix-getenv "IDYOM_ROOT")))
-  (defvar *idyom-root* (or idyom-root
-			   "/home/bastiaan/projects/idyom/")))
+  (defvar *idyom-root* (or idyom-root "../")))
 
 (let ((*standard-output* *error-output*)) ; re-route standard output to error
   (push *idyom-root* asdf:*central-registry*)
   (ql:quickload "idyom"))
 
-;;(cl:in-package #:commands)
+(defun mirex (training-set-id primes-set-id basic-attributes attributes
+	      &key (iterations 100) (duration 10) (units 4)
+		(output-dir "results") 
+		(method :metropolis) (models :both+))
+  (let* ((primes (md:get-event-sequences (list primes-set-id)))
+	 (timebase (md:timebase (first primes)))
+	 (unit-duration (/ timebase units))
+	 (event-density (event-density primes unit-duration))
+	 (continuation-length (* event-density duration)))
+    (format
+     t "Timebase: ~$. Unit-duration ~$. Event-density ~$. Continuation-length ~$.~%"
+     timebase unit-duration event-density continuation-length)
+    (dolist (prime primes)
+      (format t "Sampling continuation for ~a.~%"
+	      (md:description prime))
+      ;;(format t "Pitch sequence prime: ~{~a,~^ ~}~%"
+	;;      (map 'list #'md:chromatic-pitch prime))
+      (let* ((continuation
+	      (continuation training-set-id prime basic-attributes
+			    attributes (floor continuation-length)
+			    :iterations iterations
+			    :method method
+			    :models models))
+	     (channel 0)
+	     (duration .25)
+	     (onset 0)
+	     (midi-pitch
+	      (mapcar #'md:chromatic-pitch continuation))
+	     (morphetic-pitch
+	      (mapcar #'md:morphetic-pitch continuation))
+	     (path
+	      (format nil "~a/~a-continued.csv" output-dir (md:description prime))))
+	(with-open-file (s path :direction :output :if-exists :overwrite
+			   :if-does-not-exist :create)
+	  (format s "onset,midi-pitch,morphetic-pitch,duration,channel~%")
+	  (loop for midp in midi-pitch
+	     for morp in morphetic-pitch do
+	       (format s "~a,~a,~a,~a,~a~%" onset midp morp duration channel)
+	       (incf onset duration)))))))
 
-(defun connect-to-db (&optional	(database (sb-ext:posix-getenv "IDYOM_DB")))
-  (clsql:connect (list database) :if-exists :old :database-type :sqlite3))
+(defun event-density (sequences unit)
+  (flet ((duration (s)
+	   (let* ((l (coerce s 'list))
+		  (first (first l))
+		  (last (car (last l)))
+		  (begin (md:onset first))
+		  (end (+ (md:onset last) (md:duration last))))
+	     (- end begin))))
+    (let* ((duration (apply #'+ (mapcar #'duration sequences)))
+	   (events (apply #'+ (mapcar #'length sequences)))
+	   (density (/ events duration)))
+      (* density unit))))
+      
+(defun continuation (training-set-id prime basic-attributes attributes continuation-length
+		     &key (iterations 100) (random-state cl:*random-state*)
+		       (method :metropolis)
+		       (models :both+) use-ltms-cache?)
+  (mvs:set-models models)
+  (generation::initialise-prediction-cache training-set-id attributes)
+  (dotimes (n continuation-length)
+    (let* ((generation::*debug* nil)
+	   (training-set (md:get-event-sequences (list training-set-id)))
+	   (viewpoints (viewpoints:get-viewpoints attributes))
+	   (basic-viewpoints (viewpoints:get-basic-viewpoints basic-attributes training-set))
+	   (new-prime (dummy-continuation prime 1))
+	   (ltms (resampling:get-long-term-models viewpoints training-set nil
+						  training-set-id (format nil "~Agen" training-set-id)
+						  nil nil nil use-ltms-cache?))
+	   (mvs (mvs:make-mvs basic-viewpoints viewpoints ltms))
+	   (sequence
+	    (case method
+	      (:metropolis
+	       (generation::metropolis-sampling
+		mvs new-prime iterations random-state
+		:continuation-length (1+ n)))
+	      (:gibbs
+	       (generation::gibbs-sampling
+		mvs new-prime iterations random-state
+		:continuation-length (1+ n))))))
+      (setf prime sequence)))
+  prime)
+
+(defun dummy-continuation (prime n)
+  "Either
+* Use the random algorithm to obtain a sample.
+* Repeat the last note n times
+* Pick something from the dataset
+* Repeat the prime
+"
+  (let* ((prime (coerce prime 'list))
+	 (last (car (last prime)))
+	 (continuation))
+    (dotimes (i n)
+      ;;(push (md:copy-event (nth (- n i) prime)) continuation))
+      (push (md:copy-event last) continuation))
+    ;;(format t "Initial continuation: ~{~a,~^ ~}~%"
+;;	    (mapcar #'md:chromatic-pitch continuation))
+    (append prime continuation)))
+
+(defun run (root)
+  (let ((training-data-path (format nil "~a/training-data/" root))
+	(primes-path (format nil "~a/primes/" root))
+	(results-path (format nil "~a/results/" root)))
+    (uiop:with-temporary-file (:pathname database)
+      (format t "Using temporary database ~a.~%" database)
+      (clsql:connect (list database) :if-exists :old :database-type :sqlite3)
+      (idyom-db:initialise-database)
+      (format t "Database initialised.~%")
+      (format t "Loading training data from ~a.~%" training-data-path)
+      (idyom-db:import-data :mid training-data-path "MIREX training data" 0)
+      (format t "~%")
+      (format t "Loading primes from ~a.~%" primes-path)
+      (idyom-db:import-data :mid primes-path "MIREX primes" 1)
+      (format t "~%")
+      (mirex 0 1 '(cpitch)
+	     ;;'(thrfiph cpintfip (cpintfref dur-ratio))
+	     '(cpint)
+	     :output-dir results-path))))
+
+(let* ((argv sb-ext:*posix-argv*)
+       (cmd (car argv))
+       (args (cdr argv))
+       (root (car args)))
+  (when (null root)
+    (let ((*debugger-hook*
+	   (lambda (c v) (format t "~a~%" c) (abort c))))
+      (error "USAGE: ~a <mirex-root-dir>" cmd)))
+  (run root))
+
+
+
+
+
+
+
+
