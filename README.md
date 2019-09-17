@@ -1,11 +1,16 @@
 # Submission specs
 
 input representation: symbolic, monophonic
+
 subtasks: 1
+
 threads: see Parallelization
+
 expected memory footprint:
+
 expected runtime:
-requirements: sbcl, quicklisp
+
+requirements: sbcl, quicklisp, sqlite3
 
 # Usage
 
