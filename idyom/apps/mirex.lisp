@@ -49,8 +49,6 @@
     (dolist (prime primes)
       (format t "Sampling continuation for ~a.~%"
 	      (md:description prime))
-      (format t "Pitch sequence prime: ~{~a,~^ ~}~%"
-	      (map 'list #'md:chromatic-pitch prime))
       (generation::initialise-prediction-cache training-set-id attributes)
       (let* ((continuation
 	      (continuation mvs prime (floor continuation-length)
@@ -61,16 +59,13 @@
 	     (onset 0)
 	     (midi-pitch
 	      (mapcar #'md:chromatic-pitch continuation))
-	     (morphetic-pitch
-	      (mapcar #'md:morphetic-pitch continuation))
 	     (path
 	      (format nil "~a/~a-continued.csv" output-dir (md:description prime))))
 	(with-open-file (s path :direction :output :if-exists :overwrite
 			   :if-does-not-exist :create)
 	  (format s "onset,midi-pitch,morphetic-pitch,duration,channel~%")
 	  (loop for midp in midi-pitch
-	     for morp in morphetic-pitch do
-	       (format s "~a,~a,~a,~a,~a~%" onset midp morp duration channel)
+	       (format s "~a,~a,,~a,~a~%" onset midp duration channel)
 	       (incf onset duration)))))))
 
 (defun event-density (sequences unit)
