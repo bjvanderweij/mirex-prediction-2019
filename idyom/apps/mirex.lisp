@@ -64,7 +64,7 @@
 	(with-open-file (s path :direction :output :if-exists :overwrite
 			   :if-does-not-exist :create)
 	  (format s "onset,midi-pitch,morphetic-pitch,duration,channel~%")
-	  (loop for midp in midi-pitch
+	  (loop for midp in midi-pitch do
 	       (format s "~a,~a,,~a,~a~%" onset midp duration channel)
 	       (incf onset duration)))))))
 
