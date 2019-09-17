@@ -22,8 +22,8 @@
 
 (defparameter *debug* nil)
 
-(defgeneric sampling-predict-sequence (mvs sequence cpitch))
-(defgeneric complete-prediction (mvs sequence cached-prediction))
+(defgeneric sampling-predict-sequence (mvs sequence cpitch joint-parameters))
+(defgeneric complete-prediction (mvs sequence cached-prediction joint-parameters))
 (defgeneric metropolis-sampling (mvs sequence iterations random-state
 				 &key continuation-length))
 (defgeneric gibbs-sampling (mvs sequence iterations random-state
@@ -195,7 +195,7 @@
                 (node-children node))))
 
 (defun find-child (node symbol)
-  (find symbol (node-children node) :test #'eql :key #'node-symbol))
+  (find symbol (node-children node) :test #'equal :key #'node-symbol))
  
 (defun cache-predictions (predictions)
   (labels ((cache (node predictions)
@@ -215,32 +215,53 @@
         (push (make-node :symbol symbol :probability probability)
               (node-children node))))))
 
-(defmethod sampling-predict-sequence ((m mvs) sequence cpitch)
+(defmethod sampling-predict-sequence ((m mvs) sequence basic joint-parameters)
   (mvs:operate-on-models m #'ppm:reinitialise-ppm :models 'mvs::stm)
-  (let* ((cpitch-sequence (viewpoint-sequence cpitch sequence))
-         (cached-prediction (cached-prediction cpitch-sequence))
-         (prediction (complete-prediction m sequence cached-prediction)))
+  (let* ((basic-sequence (viewpoint-sequence basic sequence))
+         (cached-prediction (cached-prediction basic-sequence))
+         (prediction (complete-prediction m sequence cached-prediction joint-parameters)))
     (when *debug*
-      ;;(format t "Cpitch sequence ~a~%" cpitch-sequence)
+      ;;(format t "Basic sequence ~a~%" basic-sequence)
       (format t "~&Original length: ~A; Cached length: ~A; Final length: ~A~%" 
-              (length cpitch-sequence) (length cached-prediction) 
+              (length basic-sequence) (length cached-prediction) 
               (length prediction)))
     (cache-predictions prediction)
     prediction))
 
-(defmethod complete-prediction ((m mvs) sequence cached-prediction)
+(defmethod complete-prediction ((m mvs) sequence cached-prediction joint-parameters)
   (let* ((from-index (length cached-prediction))
-         (prediction 
-          (car 
-           (mvs:model-sequence m sequence :construct? nil :predict? t 
-                               :predict-from from-index
-                               :construct-from from-index))))
+	 (basic-prediction-sets
+	  (mvs:model-sequence m sequence :construct? nil :predict? t 
+			      :predict-from from-index
+			      :construct-from from-index))
+	 ;; Obtain the transpose
+         (event-predictions (apply #'mapcar (lambda (&rest basic-predictions)
+					      basic-predictions)
+				   (mapcar #'prediction-set
+					   basic-prediction-sets))))
     ;;(format t "~&Cache Length: ~A" from)
-    (append cached-prediction (get-sequence prediction))))
+    (append cached-prediction (get-sequence event-predictions joint-parameters))))
         
-(defun get-sequence (sequence-prediction)
-  (mapcar #'(lambda (x) (list (prediction-element x) (prediction-set x)))
-          (prediction-set sequence-prediction)))
+(defun get-sequence (sequence-prediction joint-parameters)
+  "Each item of sequence prediction is a list of event predictions."
+  (mapcar #'(lambda (event-prediction)
+	      (let* ((basic-attributes (mapcar #'prediction-element event-prediction))
+		     (distributions (mapcar #'prediction-set event-prediction))
+		     (joint-distribution
+		      (event-joint-distribution distributions joint-parameters)))
+		(list basic-attributes joint-distribution)))
+	  sequence-prediction))
+
+(defun event-joint-probability (basic-elements attribute-predictions)
+  (let ((p 1))
+    (loop for e in basic-elements
+       for prediction in attribute-predictions do
+	 (setf p (* p (nth 1 (assoc e prediction :test #'equal)))))
+    p))
+
+(defun event-joint-distribution (predictions parameters)
+  (loop for param in parameters collect
+       (list param (event-joint-probability param predictions))))
 
 (defun cache->ps (&optional (filename "cache.ps"))
   (let ((psgraph:*fontsize* 14)
@@ -267,67 +288,74 @@
 				&key continuation-length)
   ;(initialise-prediction-cache) 
   (let* ((sequence (coerce sequence 'list))
-         (pitch-sequence (mapcar #'(lambda (x) (get-attribute x 'cpitch))
-                                 sequence))
+	 ;; Linked viewpoint composed of relevant basic attributes
+	 (basic-attributes (mapcar #'viewpoint-type (mvs:mvs-basic m)))
+	 (joint-parameters (apply #'utils:cartesian-product
+				  (mapcar #'viewpoint-alphabet (mvs:mvs-basic m))))
+	 (basic (get-viewpoint basic-attributes))
+         (basic-sequence (viewpoint-sequence basic sequence))
          (l (length sequence))
 	 (continuation-length (or continuation-length l))
-         (cpitch (viewpoints:get-viewpoint 'cpitch))
-         (predictions (sampling-predict-sequence m sequence cpitch))
-         (original-p (seq-probability predictions)))
+         (predictions (sampling-predict-sequence m sequence basic joint-parameters))
+         (original-p (seq-probability predictions))
+	 (probability original-p))
     (dotimes (i iterations sequence)
       (let* (;(index (random-index sequence))
              (index (- l (mod i continuation-length) 1))
-             (distribution (metropolis-event-distribution predictions index))
+             (distribution (nth 1 (nth index predictions)))
              (new-sequence
-              (metropolis-new-sequence sequence distribution index random-state))
-             (old-cpitch (get-attribute (nth index sequence) 'cpitch))
-             (new-cpitch (get-attribute (nth index new-sequence) 'cpitch)))
-        (unless (eql old-cpitch new-cpitch)
+              (metropolis-new-sequence sequence distribution index random-state
+				       basic-attributes))
+             (old-event (viewpoint-element basic (list (nth index sequence))))
+             (new-event (viewpoint-element basic (list (nth index new-sequence)))))
+        (unless (equal old-event new-event)
           (when *debug*
-            (format t "~&Old cpitch: ~A; New cpitch: ~A" 
-                    old-cpitch new-cpitch)
+            (format t "~&Old event: ~A; New event: ~A" 
+                    old-event new-event)
             (format t "~&new-sequence: ~A; old-sequence: ~A~%" 
                     (length new-sequence) (length sequence)))
           (let* ((new-predictions
-                  (sampling-predict-sequence m new-sequence cpitch))
-                 (old-ep (nth 1 (assoc old-cpitch distribution :test #'=)))
-                 (new-ep (nth 1 (assoc new-cpitch distribution :test #'=)))
-                 (old-p (seq-probability predictions))
+                  (sampling-predict-sequence m new-sequence basic joint-parameters))
+                 (old-ep (nth 1 (assoc old-event distribution :test #'equal)))
+                 (new-ep (nth 1 (assoc new-event distribution :test #'equal)))
+                 (old-p probability)
                  (new-p (seq-probability new-predictions))
                  (select?
                   (metropolis-select-new-sequence? old-p new-p old-ep new-ep))
                  (next-sequence (if select? new-sequence sequence))
                  (next-predictions (if select? new-predictions predictions))
-                 (next-cpitch (if select? new-cpitch old-cpitch)))
-	    ;;(format t "Proposing ~a~%" new-cpitch)
+                 (next-cpitch (if select? new-event old-event)))
             (when select?
               (format t 
                "~&Iteration ~A; Index ~A; Orig ~A; Old ~A; New ~A; Select ~A; EP ~A; P ~A; OP ~A."
-               i index (nth index pitch-sequence) old-cpitch new-cpitch 
+               i index (nth index basic-sequence) old-event new-event 
                next-cpitch 
                (if (> new-ep old-ep) "+" "-")
                (if (> new-p old-p) "+" "-") 
                (if (> new-p original-p) "+" "-")))
-            (setf sequence next-sequence predictions next-predictions)))))))
+            (setf sequence next-sequence
+		  predictions next-predictions
+		  probability new-p)))))))
 
-(defun metropolis-event-distribution (predictions index)
-  (nth 1 (nth index predictions)))
 
-(defun metropolis-new-sequence (sequence distribution index random-state)
+(defun metropolis-new-sequence (sequence distribution index random-state
+				basic-attributes)
   (let* ((sequence-1 (subseq sequence 0 index))
          (event (nth index sequence))
          (sequence-2 (subseq sequence (1+ index)))
          (new-event (copy-event event))
-         (new-cpitch (select-from-distribution distribution random-state)))
+         (new-basic (select-from-distribution distribution random-state)))
          ;(new-cpitch (select-max-from-distribution distribution)))
-    ;(format t "~&New cpitch is ~A~%" new-cpitch)
-    (set-attribute new-event 'cpitch new-cpitch)
+					;(format t "~&New cpitch is ~A~%" new-cpitch)
+    (loop for attribute in basic-attributes
+	 for element in new-basic do
+      (set-attribute new-event attribute element))
     (append sequence-1 (list new-event) sequence-2)))
 
 (defun metropolis-select-new-sequence? (old-p new-p old-ep new-ep)
-  (let* ((n (* new-p old-ep))
-         (d (* old-p new-ep))
-         (p (if (or (zerop n) (zerop d)) 0.0 (min 1 (/ n d))))
+  (let* ((n (+ new-p old-ep))
+         (d (+ old-p new-ep))
+         (p (min 1 (exp (- n d))))
          (r (random 1.0)))
 ;;     (when (<= r p)
 ;;       (format t "~&  old-p: ~A; old-ep: ~A;~&  new-p: ~A; new-ep: ~A~%"
@@ -336,8 +364,9 @@
     (< r p)))
 
 (defun seq-probability (sequence-prediction)
-  (reduce #'* sequence-prediction
-          :key #'(lambda (x) (nth 1 (assoc (nth 0 x) (nth 1 x))))))
+  (apply #'+ (mapcar
+	      (lambda (x) (log (nth 1 (assoc (nth 0 x) (nth 1 x) :test #'equal))))
+	      sequence-prediction)))
   
 
 ;; ========================================================================
@@ -498,3 +527,13 @@
       (format t "~{~{viewpoint: ~A, original: ~A, generated: ~A, p: ~A, h: ~A, H: ~A~%~2Tdistribution: ~A~&~}~}"
               selected-attributes))
     selected-attributes))
+
+
+
+
+
+
+
+
+
+

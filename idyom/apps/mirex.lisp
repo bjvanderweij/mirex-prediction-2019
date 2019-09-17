@@ -6,36 +6,56 @@
   (when (probe-file quicklisp-init)
     (load quicklisp-init)))
 
-(let ((idyom-root (sb-ext:posix-getenv "IDYOM_ROOT")))
-  (defvar *idyom-root* (or idyom-root "../")))
+(let* ((argv sb-ext:*posix-argv*)
+       (cmd (car argv))
+       (args (cdr argv))
+       (root (car args)))
+  (when (null root)
+    (let ((*debugger-hook*
+	   (lambda (c v) (format t "~a~%" c) (abort c))))
+      (error "USAGE: ~a <mirex-root-dir>" cmd)))
+  (defvar *root* root)
+  (let ((idyom-root (format nil "~a/idyom/" root))
+	(*standard-output* *error-output*)) ; re-route standard output to error
+    (defvar *idyom-root* idyom-root)
+    (push idyom-root asdf:*central-registry*)
+    (ql:quickload "idyom")))
 
-(let ((*standard-output* *error-output*)) ; re-route standard output to error
-  (push *idyom-root* asdf:*central-registry*)
-  (ql:quickload "idyom"))
 
 (defun mirex (training-set-id primes-set-id basic-attributes attributes
 	      &key (iterations 100) (duration 10) (units 4)
-		(output-dir "results") 
+		(output-dir "results")
+		use-ltms-cache?
 		(method :metropolis) (models :both+))
   (let* ((primes (md:get-event-sequences (list primes-set-id)))
 	 (timebase (md:timebase (first primes)))
 	 (unit-duration (/ timebase units))
 	 (event-density (event-density primes unit-duration))
-	 (continuation-length (* event-density duration)))
+	 (continuation-length (* event-density duration))
+	 (training-set (md:get-event-sequences (list training-set-id)))
+	 (viewpoints (viewpoints:get-viewpoints attributes))
+	 (basic-viewpoints
+	  (viewpoints:get-basic-viewpoints basic-attributes training-set))
+	 (ltms
+	  (resampling:get-long-term-models viewpoints training-set nil
+					   training-set-id
+					   (format nil "~Agen" training-set-id)
+					   nil nil nil use-ltms-cache?))
+	 (mvs (mvs:make-mvs basic-viewpoints viewpoints ltms)))
     (format
      t "Timebase: ~$. Unit-duration ~$. Event-density ~$. Continuation-length ~$.~%"
      timebase unit-duration event-density continuation-length)
+    (mvs:set-models models)
     (dolist (prime primes)
       (format t "Sampling continuation for ~a.~%"
 	      (md:description prime))
-      ;;(format t "Pitch sequence prime: ~{~a,~^ ~}~%"
-	;;      (map 'list #'md:chromatic-pitch prime))
+      (format t "Pitch sequence prime: ~{~a,~^ ~}~%"
+	      (map 'list #'md:chromatic-pitch prime))
+      (generation::initialise-prediction-cache training-set-id attributes)
       (let* ((continuation
-	      (continuation training-set-id prime basic-attributes
-			    attributes (floor continuation-length)
+	      (continuation mvs prime (floor continuation-length)
 			    :iterations iterations
-			    :method method
-			    :models models))
+			    :method method))
 	     (channel 0)
 	     (duration .25)
 	     (onset 0)
@@ -66,22 +86,12 @@
 	   (density (/ events duration)))
       (* density unit))))
       
-(defun continuation (training-set-id prime basic-attributes attributes continuation-length
+(defun continuation (mvs prime continuation-length
 		     &key (iterations 100) (random-state cl:*random-state*)
-		       (method :metropolis)
-		       (models :both+) use-ltms-cache?)
-  (mvs:set-models models)
-  (generation::initialise-prediction-cache training-set-id attributes)
+		       (method :metropolis))
   (dotimes (n continuation-length)
     (let* ((generation::*debug* nil)
-	   (training-set (md:get-event-sequences (list training-set-id)))
-	   (viewpoints (viewpoints:get-viewpoints attributes))
-	   (basic-viewpoints (viewpoints:get-basic-viewpoints basic-attributes training-set))
 	   (new-prime (dummy-continuation prime 1))
-	   (ltms (resampling:get-long-term-models viewpoints training-set nil
-						  training-set-id (format nil "~Agen" training-set-id)
-						  nil nil nil use-ltms-cache?))
-	   (mvs (mvs:make-mvs basic-viewpoints viewpoints ltms))
 	   (sequence
 	    (case method
 	      (:metropolis
@@ -108,14 +118,13 @@
     (dotimes (i n)
       ;;(push (md:copy-event (nth (- n i) prime)) continuation))
       (push (md:copy-event last) continuation))
-    ;;(format t "Initial continuation: ~{~a,~^ ~}~%"
-;;	    (mapcar #'md:chromatic-pitch continuation))
+;    (format t "Initial continuation: ~{~a,~^ ~}~%"
+;	    (mapcar #'md:chromatic-pitch continuation))
     (append prime continuation)))
 
-(defun run (root)
+(defun temporary-database (root)
   (let ((training-data-path (format nil "~a/training-data/" root))
-	(primes-path (format nil "~a/primes/" root))
-	(results-path (format nil "~a/results/" root)))
+	(primes-path (format nil "~a/primes/" root)))
     (uiop:with-temporary-file (:pathname database)
       (format t "Using temporary database ~a.~%" database)
       (clsql:connect (list database) :if-exists :old :database-type :sqlite3)
@@ -127,25 +136,26 @@
       (format t "Loading primes from ~a.~%" primes-path)
       (idyom-db:import-data :mid primes-path "MIREX primes" 1)
       (format t "~%")
-      (mirex 0 1 '(cpitch)
-	     ;;'(thrfiph cpintfip (cpintfref dur-ratio))
-	     '(cpint)
-	     :output-dir results-path))))
+      database)))
 
-(let* ((argv sb-ext:*posix-argv*)
-       (cmd (car argv))
-       (args (cdr argv))
-       (root (car args)))
-  (when (null root)
-    (let ((*debugger-hook*
-	   (lambda (c v) (format t "~a~%" c) (abort c))))
-      (error "USAGE: ~a <mirex-root-dir>" cmd)))
-  (run root))
+(defun fixed-database (root)
+  (let ((database (format nil "~a/database.sqlite" root)))
+    (format t "Using database ~a.~%" database)
+    (clsql:connect (list database) :if-exists :old :database-type :sqlite3)))
 
+(defun run (root)
+  (let ((results-path (format nil "~a/results/" root)))
+    (mirex 0 1
+	   '(cpitch)
+	   ;;'(cpitch bioi)
+	   ;;'(thrfiph cpintfip (cpintfref dur-ratio))
+	   ;; (cpint ioi)
+	   '(cpint)
+	   :output-dir results-path)))
 
-
-
-
+;(fixed-database *root*)
+(temporary-database *root*)
+(run *root*)
 
 
 
