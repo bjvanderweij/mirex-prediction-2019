@@ -75,16 +75,25 @@
 ;;; ONSET ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 ;; Like bioi, but undefined for first event in sequence
-(define-viewpoint (ioi derived (onset))
+;;(define-viewpoint (ioi derived (onset))
+;;    ((events md:music-sequence) element) 
+;;  :function (multiple-value-bind (e1 e2)
+;;                (values-list (last events 2))
+;;              (if (or (null e1) (null e2)) +undefined+
+;;                  (let ((onset1 (onset (list e1)))
+;;                        (onset2 (onset (list e2))))
+;;                    (if (undefined-p onset1 onset2) +undefined+
+;;                        (- onset2 onset1)))))
+;;  :function* (list (+ element (onset (list (penultimate-element events))))))
+
+(define-viewpoint (ioi derived (bioi))
     ((events md:music-sequence) element) 
   :function (multiple-value-bind (e1 e2)
                 (values-list (last events 2))
               (if (or (null e1) (null e2)) +undefined+
-                  (let ((onset1 (onset (list e1)))
-                        (onset2 (onset (list e2))))
-                    (if (undefined-p onset1 onset2) +undefined+
-                        (- onset2 onset1)))))
-  :function* (list (+ element (onset (list (penultimate-element events))))))
+		  (bioi events)))
+  :function* (list element))
+
 
 ;; ioi divided by the previous ioi (requires at least 3 events).
 (define-viewpoint (ioi-ratio derived (onset))
